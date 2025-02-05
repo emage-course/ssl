@@ -1,0 +1,96 @@
+### Here's the updated script with email notifications for 30-day and 7-day expiration warnings. It checks certificate expiration, sends an email alert if the certificate is close to expiration, and includes Solomon Williams as the last modified author.
+
+#!/bin/bash
+######################################################################################
+#   Name:  check_certs_exipration_date.sh
+#   Goal:  Query via openssl s_client process to sort and find the expiration date of 
+#          each remote hosts' TLS servers certs and if possible, intermediate ca & root ca certs.
+#          Return subject name and serial number of each cert. Sends email notifications 
+#          30 days and 7 days before expiration.
+#
+#  Last Modified: Solomon Williams - 02/2025
+######################################################################################
+
+# Define input and output files
+INPUT_FILE="fqdn_list.txt"  # Input file with fqdn:port format (one per line)
+OUTPUT_FILE="certs_info.csv" # Output CSV file
+EMAIL_RECIPIENT="your_email@example.com"
+
+# Check if the input file exists
+if [[ ! -f $INPUT_FILE ]]; then
+    echo "Input file '$INPUT_FILE' not found."
+    exit 1
+fi
+
+# Initialize the output CSV file with headers
+echo "Expiration (YYYYMMDD),FQDN,Port,Expiration Date (Org),Serial Number,Subject Name" > "$OUTPUT_FILE"
+
+# Read the input file line by line
+while IFS= read -r line; do
+    # Split FQDN and port
+    FQDN=$(echo "$line" | cut -d: -f1)
+    PORT=$(echo "$line" | cut -d: -f2)
+
+    if [[ -z "$FQDN" || -z "$PORT" ]]; then
+        echo "Skipping invalid line: $line"
+        continue
+    fi
+
+    # Fetch the certificate using OpenSSL
+    echo | openssl s_client -connect "$FQDN:$PORT" -showcerts 2>/dev/null > "temp_output.txt"
+
+    if [[ $? -ne 0 ]]; then
+        echo "Failed to connect to $FQDN:$PORT"
+        rm -f temp_output.txt
+        continue
+    fi
+
+    # Extract certificates
+    awk '/-----BEGIN CERTIFICATE-----/,/-----END CERTIFICATE-----/' temp_output.txt > "temp_cert.pem"
+
+    if [[ ! -s temp_cert.pem ]]; then
+        echo "No valid certificates found for $FQDN:$PORT"
+        rm -f temp_output.txt temp_cert.pem
+        continue
+    fi
+
+    # Split certificates
+    csplit -s -z -f cert_part_ temp_cert.pem '/-----BEGIN CERTIFICATE-----/' '{*}'
+
+    for CERT_FILE in cert_part_*; do
+        # Extract expiration date, subject name, and serial number
+        EXPIRATION_DATE=$(openssl x509 -enddate -noout -in "$CERT_FILE" 2>/dev/null | cut -d= -f2)
+        SUBJECT_NAME=$(openssl x509 -subject -noout -in "$CERT_FILE" 2>/dev/null | sed 's/subject= //')
+        SERIAL_NUMBER=$(openssl x509 -serial -noout -in "$CERT_FILE" 2>/dev/null | cut -d= -f2)
+
+        if [[ -n "$EXPIRATION_DATE" && -n "$SUBJECT_NAME" && -n "$SERIAL_NUMBER" ]]; then
+            # Convert expiration date to YYYYMMDD format
+            FORMATTED_DATE=$(date -d "$EXPIRATION_DATE" +"%Y%m%d" 2>/dev/null)
+            TODAY=$(date +"%Y%m%d")
+            THIRTY_DAYS=$(date -d "+30 days" +"%Y%m%d")
+            SEVEN_DAYS=$(date -d "+7 days" +"%Y%m%d")
+
+            # Append data to CSV file
+            echo "$FORMATTED_DATE,$FQDN,$PORT,$EXPIRATION_DATE,$SERIAL_NUMBER,\"$SUBJECT_NAME\"" >> "$OUTPUT_FILE"
+
+            # Send email notifications
+            if [[ "$FORMATTED_DATE" -eq "$THIRTY_DAYS" ]]; then
+                echo -e "Subject: SSL Certificate Expiring Soon - $FQDN\n\nCertificate for $FQDN on port $PORT expires in 30 days on $EXPIRATION_DATE.\nSerial: $SERIAL_NUMBER\nSubject: $SUBJECT_NAME" | sendmail "$EMAIL_RECIPIENT"
+                echo "30-day expiration email sent for $FQDN:$PORT"
+            elif [[ "$FORMATTED_DATE" -eq "$SEVEN_DAYS" ]]; then
+                echo -e "Subject: FINAL NOTICE: SSL Certificate Expiring Soon - $FQDN\n\nCertificate for $FQDN on port $PORT expires in 7 days on $EXPIRATION_DATE.\nSerial: $SERIAL_NUMBER\nSubject: $SUBJECT_NAME" | sendmail "$EMAIL_RECIPIENT"
+                echo "7-day final notice email sent for $FQDN:$PORT"
+            fi
+        else
+            echo "Could not parse certificate details for $FQDN:$PORT"
+        fi
+    done
+
+    # Clean up temporary files
+    rm -f temp_output.txt temp_cert.pem cert_part_*
+
+done < "$INPUT_FILE"
+
+echo "Certificate information saved to $OUTPUT_FILE"
+
+
