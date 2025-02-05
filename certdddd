@@ -1,0 +1,35 @@
+#!/bin/bash
+
+# Define the directories for storing the files
+SSL_DIR="/etc/tower/ssl"
+mkdir -p $SSL_DIR
+
+# Define the file names
+PRIVATE_KEY="$SSL_DIR/tower.key"
+CERTIFICATE="$SSL_DIR/tower.crt"
+CA_CHAIN="$SSL_DIR/ca_chain.crt"
+
+# Define the Common Name (CN) for the certificate (replace with your domain or IP)
+CN="your-ansible-tower-domain"
+
+# Generate a private key (RSA 2048 bits)
+echo "Generating private key..."
+openssl genpkey -algorithm RSA -out $PRIVATE_KEY -pkeyopt rsa_keygen_bits:2048
+
+# Generate the self-signed certificate (valid for 3650 days = 10 years)
+echo "Generating self-signed certificate..."
+openssl req -new -x509 -key $PRIVATE_KEY -out $CERTIFICATE -days 3650 -subj "/CN=$CN"
+
+# Create a CA chain file by copying the self-signed certificate (for a self-signed certificate, it's the same)
+echo "Creating CA chain file..."
+cp $CERTIFICATE $CA_CHAIN
+
+# Set proper permissions (optional, for security reasons)
+echo "Setting proper file permissions..."
+chmod 600 $PRIVATE_KEY
+chmod 644 $CERTIFICATE $CA_CHAIN
+
+echo "Self-signed certificate and CA chain generated successfully!"
+echo "Private Key: $PRIVATE_KEY"
+echo "Certificate: $CERTIFICATE"
+echo "CA Chain: $CA_CHAIN"
