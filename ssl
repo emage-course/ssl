@@ -1,0 +1,220 @@
+### v1
+#!/bin/bash
+
+# List of domains to check
+DOMAINS=("example.com" "yourdomain.com" "anotherdomain.org")
+
+# Notification settings
+EMAIL="your_email@example.com"
+DAYS_THRESHOLD=30
+
+# Function to check SSL expiration
+check_ssl_expiry() {
+    local domain=$1
+    local expiry_date
+    local expiry_days
+
+    # Extract expiration date
+    expiry_date=$(echo | openssl s_client -servername "$domain" -connect "$domain:443" 2>/dev/null | openssl x509 -noout -enddate | cut -d= -f2)
+
+    # Convert expiry date to epoch time
+    expiry_epoch=$(date -d "$expiry_date" +%s)
+    current_epoch=$(date +%s)
+
+    # Calculate remaining days
+    expiry_days=$(( (expiry_epoch - current_epoch) / 86400 ))
+
+    # Check if the certificate is expiring soon
+    if [ "$expiry_days" -le "$DAYS_THRESHOLD" ]; then
+        echo "SSL Certificate for $domain is expiring in $expiry_days days ($expiry_date)" | mail -s "SSL Expiry Warning: $domain" "$EMAIL"
+    fi
+}
+
+# Loop through domains and check SSL expiry
+for domain in "${DOMAINS[@]}"; do
+    check_ssl_expiry "$domain"
+done
+
+
+################################################################
+
+### v2 
+
+1. Setup Cron Job for Daily Execution
+Make script executable:
+chmod +x /path/to/ssl_cert_monitor.sh
+
+2. Edit crontab:
+crontab -e
+
+3. Add this line to check SSL certificates daily at 9 AM:
+0 9 * * * /path/to/ssl_cert_monitor.sh
+
+################################################################
+
+
+#!/bin/bash
+
+# Email notification settings
+EMAIL="your_email@example.com"
+THRESHOLD1=30  # First alert (30 days before expiration)
+THRESHOLD2=7   # Final alert (7 days before expiration)
+
+# List of domains to check
+DOMAINS=("example.com" "yourdomain.com" "anotherdomain.org")
+
+# Find SSL certificates in these locations
+CERT_PATHS=("/etc/ssl/certs" "/etc/letsencrypt/live")
+
+# Function to check SSL certificate expiry and get domain
+check_ssl_expiry() {
+    local cert_file=$1
+
+    if [ -f "$cert_file" ]; then
+        # Extract expiration date
+        expiry_date=$(openssl x509 -enddate -noout -in "$cert_file" | cut -d= -f2)
+        expiry_epoch=$(date -d "$expiry_date" +%s)
+        current_epoch=$(date +%s)
+        expiry_days=$(( (expiry_epoch - current_epoch) / 86400 ))
+
+        # Extract domain name from the certificate
+        domain_name=$(openssl x509 -subject -noout -in "$cert_file" | awk -F'CN=' '{print $2}' | awk '{print $1}')
+
+        # If domain matches, check the expiry
+        for domain in "${DOMAINS[@]}"; do
+            if [[ "$domain_name" == "$domain" ]]; then
+                if [ "$expiry_days" -le "$THRESHOLD1" ] && [ "$expiry_days" -gt "$THRESHOLD2" ]; then
+                    echo -e "Subject: SSL Expiry Warning (30 days) for $domain_name\n\nSSL Certificate ($cert_file) for domain: $domain_name expires in $expiry_days days ($expiry_date)." | sendmail "$EMAIL"
+                elif [ "$expiry_days" -le "$THRESHOLD2" ]; then
+                    echo -e "Subject: FINAL NOTICE: SSL Expiry (7 days) for $domain_name\n\nFINAL NOTICE: SSL Certificate ($cert_file) for domain: $domain_name expires in $expiry_days days ($expiry_date)." | sendmail "$EMAIL"
+                fi
+            fi
+        done
+    fi
+}
+
+# Find and check SSL certificates for the specified domains
+for path in "${CERT_PATHS[@]}"; do
+    if [ -d "$path" ]; then
+        find "$path" -name "*.crt" -o -name "*.pem" | while read -r cert; do
+            check_ssl_expiry "$cert"
+        done
+    fi
+done
+
+########################################################################
+
+#!/bin/bash
+######################################################################################
+#   Name:  check_certs_expiration_date.sh
+#   Goal:  Query via openssl s_client process to sort and find the expiration date of 
+#          each remote hosts' TLS servers certs and if possible, intermediate ca & root ca certs.
+#          Return subject name and serial number of each cert.
+#
+#  ANA 12/2024
+######################################################################################
+
+# Define input and output files
+INPUT_FILE="fqdn_list.txt"  # Input file with fqdn:port format (one per line)
+OUTPUT_FILE="certs_info.csv" # Output CSV file
+
+# Email notification details
+EMAIL="your_email@example.com"
+DAYS_AHEAD=30  # Number of days before expiration to send email notification
+FINAL_NOTICE_DAYS=7  # Days before expiration to send final notification
+
+# Check if the input file exists
+if [[ ! -f $INPUT_FILE ]]; then
+    echo "Input file '$INPUT_FILE' not found."
+    exit 1
+fi
+
+# Initialize the output CSV file with headers
+echo "Expiration (YYYYMMDD),FQDN,Port,Expiration Date (Org),Serial Number,Subject Name" > "$OUTPUT_FILE"
+
+# Read the input file line by line
+while IFS= read -r line; do
+    # Split FQDN and port
+    FQDN=$(echo "$line" | cut -d: -f1)
+    PORT=$(echo "$line" | cut -d: -f2)
+
+    if [[ -z "$FQDN" || -z "$PORT" ]]; then
+        echo "Skipping invalid line: $line"
+        continue
+    fi
+
+    # Fetch the certificate using openssl
+    echo | openssl s_client -connect "$FQDN:$PORT" -showcerts 2>/dev/null > "temp_output.txt"
+
+    if [[ $? -ne 0 ]]; then
+        echo "Failed to connect to $FQDN:$PORT"
+        rm -f temp_output.txt
+        continue
+    fi
+
+    # Extract the certificates from the output
+    awk '/-----BEGIN CERTIFICATE-----/,/-----END CERTIFICATE-----/' temp_output.txt > "temp_cert.pem"
+
+    # Check if the file has valid certificates
+    if [[ ! -s temp_cert.pem ]]; then
+        echo "No valid certificates found for $FQDN:$PORT"
+        rm -f temp_output.txt temp_cert.pem
+        continue
+    fi
+
+    # Split certificates into separate files
+    csplit -s -z -f cert_part_ temp_cert.pem '/-----BEGIN CERTIFICATE-----/' '{*}'
+
+    for CERT_FILE in cert_part_*; do
+        # Extract expiration date, subject name, and serial number
+        EXPIRATION_DATE=$(openssl x509 -enddate -noout -in "$CERT_FILE" 2>/dev/null | cut -d= -f2)
+        SUBJECT_NAME=$(openssl x509 -subject -noout -in "$CERT_FILE" 2>/dev/null | sed 's/subject= //')
+        SERIAL_NUMBER=$(openssl x509 -serial -noout -in "$CERT_FILE" 2>/dev/null | cut -d= -f2)
+
+        if [[ -n "$EXPIRATION_DATE" && -n "$SUBJECT_NAME" && -n "$SERIAL_NUMBER" ]]; then
+            # Convert expiration date to YYYYMMDD format
+            FORMATTED_DATE=$(date -d "$EXPIRATION_DATE" +"%Y%m%d" 2>/dev/null)
+
+            # Append data to CSV file
+            echo "$FORMATTED_DATE,$FQDN,$PORT,$EXPIRATION_DATE,$SERIAL_NUMBER,\"$SUBJECT_NAME\"" >> "$OUTPUT_FILE"
+
+            # Check if the certificate is expiring soon
+            EXPIRATION_TIMESTAMP=$(date -d "$EXPIRATION_DATE" +%s)
+            CURRENT_TIMESTAMP=$(date +%s)
+            DIFF_DAYS=$(( (EXPIRATION_TIMESTAMP - CURRENT_TIMESTAMP) / 86400 ))
+
+            # Send a notification 30 days before expiration
+            if (( DIFF_DAYS <= DAYS_AHEAD && DIFF_DAYS > FINAL_NOTICE_DAYS )); then
+                # Send email notification for 30 days ahead
+                echo -e "Subject: SSL Certificate Expiry Warning for $FQDN:$PORT\n\nThe SSL certificate for $FQDN:$PORT is expiring on $EXPIRATION_DATE. Please renew the certificate before the expiration date." | sendmail "$EMAIL"
+            fi
+
+            # Send a final notification 7 days before expiration
+            if (( DIFF_DAYS <= FINAL_NOTICE_DAYS && DIFF_DAYS > 0 )); then
+                # Send final email notification for 7 days before expiration
+                echo -e "Subject: FINAL SSL Certificate Expiry Warning for $FQDN:$PORT\n\nThe SSL certificate for $FQDN:$PORT will expire in 7 days, on $EXPIRATION_DATE. Please renew the certificate immediately." | sendmail "$EMAIL"
+            fi
+        else
+            echo "Could not parse certificate details for $FQDN:$PORT"
+        fi
+    done
+
+    # Clean up temporary files
+    rm -f temp_output.txt temp_cert.pem cert_part_*
+
+done < "$INPUT_FILE"
+
+echo "Certificate information saved to $OUTPUT_FILE"
+
+
+
+################################################################
+
+ find /etc/ssl -name "*.crt" -name "*.cer" -o -name "*.pem"
+
+ INPUT_FILE="fqdn_list.txt"  # Input file with fqdn:port format (one per line)
+OUTPUT_FILE="certs_info.csv" # Output CSV file
+
+################################################################
+
+                       https://github.com/anapartner-com/ssl-cert-expiration-date-check/tree/main
