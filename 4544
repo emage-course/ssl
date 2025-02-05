@@ -1,0 +1,63 @@
+#!/bin/bash
+
+################################################################################
+#   Name: check_ssl_domains.sh
+#   Description: Checks SSL certificate expiration for specified domains,
+#   saves results to a CSV file, and emails the report.
+#   Author: Solomon Williams
+#   Last Modified: 2025-02
+################################################################################
+
+# Email notification settings
+EMAIL="your_email@example.com"
+THRESHOLD1=30  # First alert (30 days before expiration)
+THRESHOLD2=7   # Final alert (7 days before expiration)
+
+# List of domains to check (with ports if needed)
+DOMAINS=("example.com:443" "yourdomain.com:443" "anotherdomain.org:443")
+
+# CSV output file
+CSV_FILE="/tmp/ssl_expiry_report.csv"
+
+# Initialize CSV file with headers
+echo "Domain,Expiration Date,Days Until Expiry" > "$CSV_FILE"
+
+# Function to check SSL certificate expiry
+check_ssl_expiry() {
+    local domain=$1
+
+    # Extract certificate details using openssl s_client
+    cert_info=$(echo | openssl s_client -servername "${domain%%:*}" -connect "$domain" 2>/dev/null | openssl x509 -noout -enddate -subject)
+    
+    if [ -z "$cert_info" ]; then
+        echo "$domain,ERROR,Could not retrieve certificate" >> "$CSV_FILE"
+        return
+    fi
+
+    expiry_date=$(echo "$cert_info" | grep 'notAfter' | cut -d= -f2)
+    subject=$(echo "$cert_info" | grep 'subject=' | sed 's/subject= //')
+
+    expiry_epoch=$(date -d "$expiry_date" +%s 2>/dev/null)
+    current_epoch=$(date +%s)
+    expiry_days=$(( (expiry_epoch - current_epoch) / 86400 ))
+
+    # Save result to CSV
+    echo "$domain,$expiry_date,$expiry_days" >> "$CSV_FILE"
+
+    # Send alerts if nearing expiration
+    if [ "$expiry_days" -le "$THRESHOLD1" ] && [ "$expiry_days" -gt "$THRESHOLD2" ]; then
+        echo -e "Subject: SSL Expiry Warning (30 days) for $domain\n\nSSL Certificate for $domain expires in $expiry_days days ($expiry_date)." | sendmail "$EMAIL"
+    elif [ "$expiry_days" -le "$THRESHOLD2" ]; then
+        echo -e "Subject: FINAL NOTICE: SSL Expiry (7 days) for $domain\n\nFINAL NOTICE: SSL Certificate for $domain expires in $expiry_days days ($expiry_date)." | sendmail "$EMAIL"
+    fi
+}
+
+# Check each domain
+for domain in "${DOMAINS[@]}"; do
+    check_ssl_expiry "$domain"
+done
+
+# Email the CSV report
+echo "SSL Certificate Expiry Report Attached." | mail -s "SSL Expiry Report" -a "$CSV_FILE" "$EMAIL"
+
+echo "SSL check completed. Report saved to $CSV_FILE and emailed to $EMAIL."
