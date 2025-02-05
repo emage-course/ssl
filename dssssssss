@@ -1,0 +1,58 @@
+#!/bin/bash
+
+################################################################################
+#   Name: install_postfix_rhel8.sh
+#   Description: Installs and configures Postfix as a simple SMTP server 
+#                or relay on RHEL 8 without authentication.
+#   Author: Solomon Williams
+#   Last Modified: 2025-02
+################################################################################
+
+# Define SMTP relay (if needed)
+SMTP_RELAY="smtp.yourrelay.com"  # Change if using an external relay, else leave empty
+
+# Ensure script is run as root
+if [ "$(id -u)" -ne 0 ]; then
+    echo "Error: This script must be run as root!"
+    exit 1
+fi
+
+echo "Updating system packages..."
+dnf update -y
+
+echo "Installing Postfix and mail utilities..."
+dnf install -y postfix mailx
+
+echo "Backing up the default Postfix configuration..."
+cp /etc/postfix/main.cf /etc/postfix/main.cf.bak
+
+echo "Configuring Postfix..."
+cat <<EOF > /etc/postfix/main.cf
+# Basic Postfix setup
+myhostname = $(hostname)
+mydomain = $(hostname -d)
+myorigin = \$mydomain
+inet_interfaces = all
+inet_protocols = ipv4
+mydestination = localhost, \$myhostname, \$mydomain
+
+# SMTP relay configuration (optional)
+relayhost = [$SMTP_RELAY]:25  # Remove or leave empty to run as standalone SMTP
+smtp_sasl_auth_enable = no  # No authentication required
+smtp_use_tls = no  # Disable TLS if not required
+EOF
+
+echo "Enabling and starting Postfix..."
+systemctl enable --now postfix
+
+echo "Allowing SMTP traffic through firewall..."
+firewall-cmd --permanent --add-service=smtp
+firewall-cmd --reload
+
+echo "Restarting Postfix to apply changes..."
+systemctl restart postfix
+
+echo "Testing email sending..."
+echo "Test email from RHEL 8 SMTP server" | mail -s "SMTP Test" recipient@example.com
+
+echo "Postfix SMTP setup completed successfully! ✅"
